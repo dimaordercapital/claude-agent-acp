@@ -755,14 +755,20 @@ export class ClaudeAcpAgent implements Agent {
       while (true) {
         const { value: message, done } = await session.query.next();
 
-        // Bail as soon as cancellation is observed, rather than draining the
-        // SDK iterator. The SDK's `query.interrupt()` is graceful and lets the
-        // in-flight assistant message stream finish before yielding `done`,
-        // which leaves the originating `session/prompt` request unresolved
-        // for hundreds of tokens after the client sent `session/cancel`. With
-        // single-prompt-per-session serialization on the client side, that
-        // delay manifests as a stuck "Send now" until generation drains.
+        // Drain the SDK iterator to its terminal state without forwarding
+        // post-cancel chunks to the client. The user-visible UI freezes
+        // immediately (no streaming tail after Send now / cancel), but the
+        // SDK still reaches a clean state before this prompt() returns —
+        // critical because the bundled `claude` binary's `makeRequest`
+        // remembers the abort signal across the iterator's lifetime, and a
+        // new session/prompt starting before drain completes is rejected
+        // with `Internal error: ... Error: Request was aborted.` from
+        // `cli.js`'s makeRequest.
         if (session.cancelled) {
+          while (true) {
+            const drained = await session.query.next();
+            if (drained.done) break;
+          }
           return { stopReason: "cancelled" };
         }
 
