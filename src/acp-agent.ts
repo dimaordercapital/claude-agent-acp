@@ -755,10 +755,18 @@ export class ClaudeAcpAgent implements Agent {
       while (true) {
         const { value: message, done } = await session.query.next();
 
+        // Bail as soon as cancellation is observed, rather than draining the
+        // SDK iterator. The SDK's `query.interrupt()` is graceful and lets the
+        // in-flight assistant message stream finish before yielding `done`,
+        // which leaves the originating `session/prompt` request unresolved
+        // for hundreds of tokens after the client sent `session/cancel`. With
+        // single-prompt-per-session serialization on the client side, that
+        // delay manifests as a stuck "Send now" until generation drains.
+        if (session.cancelled) {
+          return { stopReason: "cancelled" };
+        }
+
         if (done || !message) {
-          if (session.cancelled) {
-            return { stopReason: "cancelled" };
-          }
           break;
         }
 
@@ -1105,7 +1113,14 @@ export class ClaudeAcpAgent implements Agent {
               this.logger.error(message.message.content);
               break;
             }
-            // Skip these user messages for now, since they seem to just be messages we don't want in the feed
+            // Surface synthetic single-text user messages that explain the next
+            // assistant turn (background-task completions, system reminders).
+            // Without this, after a `run_in_background` Bash returns and later
+            // completes, the SDK injects a `<task-notification>` user message
+            // and the assistant generates a follow-up response inside the same
+            // `session/prompt` — but the user only sees the response, with no
+            // visible cause. Other synthetic single-text user messages are
+            // still dropped to preserve the original feed-noise filtering.
             if (
               message.type === "user" &&
               (typeof message.message.content === "string" ||
@@ -1113,6 +1128,24 @@ export class ClaudeAcpAgent implements Agent {
                   message.message.content.length === 1 &&
                   message.message.content[0].type === "text"))
             ) {
+              const userText =
+                typeof message.message.content === "string"
+                  ? message.message.content
+                  : (
+                      message.message.content[0] as {
+                        type: "text";
+                        text: string;
+                      }
+                    ).text;
+              if (/<task-notification>|<system-reminder>/.test(userText)) {
+                await this.client.sessionUpdate({
+                  sessionId: params.sessionId,
+                  update: {
+                    sessionUpdate: "agent_message_chunk",
+                    content: { type: "text", text: userText },
+                  },
+                });
+              }
               break;
             }
 
