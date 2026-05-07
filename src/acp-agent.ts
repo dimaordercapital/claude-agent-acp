@@ -844,12 +844,34 @@ export class ClaudeAcpAgent implements Agent {
                 }
                 break;
               }
+              case "task_notification": {
+                // Surface completion of `run_in_background` Bash tasks. Without
+                // this, when a bg task finishes, the SDK injects context that
+                // drives a follow-up assistant response inside the still-open
+                // `session/prompt`, but the user sees no event explaining why
+                // the assistant suddenly resumes generating. Emitting the
+                // SDK-supplied `summary` as a visible chunk gives the user
+                // that signal.
+                const summary =
+                  typeof (message as { summary?: unknown }).summary === "string"
+                    ? (message as { summary: string }).summary
+                    : `Background task ${
+                        (message as { task_id?: string }).task_id ?? ""
+                      } ${(message as { status?: string }).status ?? "updated"}`;
+                await this.client.sessionUpdate({
+                  sessionId: (message as { session_id: string }).session_id,
+                  update: {
+                    sessionUpdate: "agent_message_chunk",
+                    content: { type: "text", text: `[bg task] ${summary}` },
+                  },
+                });
+                break;
+              }
               case "hook_started":
               case "hook_progress":
               case "hook_response":
               case "files_persisted":
               case "task_started":
-              case "task_notification":
               case "task_progress":
               case "task_updated":
               case "elicitation_complete":
